@@ -2,7 +2,7 @@ import fu from '@nraynaud/struct-fu'
 import getStream from 'get-stream'
 
 const VHD_UTIL_DEBUG = 0
-const debug = VHD_UTIL_DEBUG ? str => console.log(`[vhd-util]${str}`) : () =>{}
+const debug = VHD_UTIL_DEBUG ? str => console.log(`[vhd-util]${str}`) : () => {}
 const streamToBuffer = getStream.buffer
 // ===================================================================
 //
@@ -25,9 +25,11 @@ const VHD_ENTRY_SIZE = 4
 const VHD_PARENT_LOCATOR_ENTRIES = 8
 const VHD_PLATFORM_CODE_NONE = 0
 
+/* eslint-disable no-unused-vars */
 // Types of backup treated. Others are not supported.
 const HARD_DISK_TYPE_DYNAMIC = 3 // Full backup.
 const HARD_DISK_TYPE_DIFFERENCING = 4 // Delta backup.
+/* eslint-enable no-unused vars */
 
 // Other.
 const BLOCK_UNUSED = 0xFFFFFFFF

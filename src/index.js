@@ -1,121 +1,147 @@
+#!/usr/bin/env node
+
+import execPromise from 'exec-promise'
+import fs from 'fs'
 import fuse from 'fuse-bindings'
-import fs from 'fs-promise'
-import {RemoteHandlerLocal} from '@nraynaud/xo-fs'
-import {Vhd} from './vhd'
+import path from 'path'
+import { forEach, map } from 'lodash'
+import { fromCallback } from 'promise-toolbox'
+import { RemoteHandlerLocal } from '@nraynaud/xo-fs'
 
-console.log('starting vhd-mount')
+import { Vhd } from './vhd'
 
+const {
+  S_IFDIR,
+  S_IFREG,
+  S_IRUSR,
+  S_IXUSR
+} = fs.constants
 
-function mountIt (dir, vhd) {
-  console.log('mountIt', dir)
-  fuse.mount(dir, {
-    error: function (error) {
-      console.log('error', error)
-    },
-    init: function (cb) {
-      console.log('init')
-      process.on('SIGINT', function () {
-        fuse.unmount(dir, function () {
-          process.exit()
-        })
-      })
+const mountVhd = (dir, vhd) => fromCallback(cb => {
+  const operations = {
+    init (cb) {
       cb(0)
-      setTimeout(()=> {
-        fs.stat(dir + '/disk').then(stats => {
-          console.log(stats)
-        })
-      }, 1)
     },
-    statfs: function (path, cb) {
-      console.log('statfs(%s)', path)
+    statfs (path, cb) {
       cb(0, {})
     },
-    readdir: function (path, cb) {
-      console.log('readdir(%s)', path)
-      if (path === '/') return cb(0, ['disk'])
-      cb(0)
+    readdir (path, cb) {
+      if (path === '/') {
+        cb(0, ['disk'])
+      } else {
+        cb(fuse.NOENT)
+      }
     },
-    getattr: function (path, cb) {
-      console.log('getattr(%s)', path)
+    getattr (path, cb) {
+      const now = new Date()
+      const { uid, gid } = fuse.context()
+
       if (path === '/') {
         cb(0, {
-          mtime: new Date(),
-          atime: new Date(),
-          ctime: new Date(),
+          atime: now,
+          ctime: now,
+          gid,
+          mode: S_IFDIR | S_IRUSR | S_IXUSR,
+          mtime: now,
           size: 100,
-          mode: parseInt('40000', 8) + parseInt('0444', 8),
-          uid: process.getuid(),
-          gid: process.getgid()
+          uid
         })
-        return
-      }
-      if (path === '/disk') {
-        const diskSize = vhd.footer.currentSize.high * Math.pow(2, 32) + vhd.footer.currentSize.low;
+      } else if (path === '/disk') {
+        const diskSize = vhd.footer.currentSize.high * Math.pow(2, 32) + vhd.footer.currentSize.low
         cb(0, {
+          atime: now,
+          ctime: now,
+          gid,
+          mode: S_IFREG | S_IRUSR,
+          mtime: now,
           nlink: 1,
-          mtime: new Date(),
-          atime: new Date(),
-          ctime: new Date(),
           size: diskSize,
-          mode: parseInt('100000', 8) + parseInt('0444', 8),
-          uid: process.getuid(),
-          gid: process.getgid()
+          uid
         })
-        return
+      } else {
+        cb(fuse.ENOENT)
       }
-
-      cb(fuse.ENOENT)
     },
-    open: function (path, flags, cb) {
-      console.log('open(%s, %d)', path, flags)
+    open (path, flags, cb) {
       cb(0, 42) // 42 is an fd
     },
-    read: function (path, fd, buf, len, pos, cb) {
-      console.log('read(%s, %d, %d)', path, pos, len)
+    read (path, fd, buf, len, pos, cb) {
       const blockSizeBytes = vhd.sectorsPerBlock * 512
       const posInBlock = pos % blockSizeBytes
       const tableEntry = Math.floor(pos / blockSizeBytes)
-      const blockAddress = vhd.header.maxTableEntries > tableEntry ? vhd.readAllocationTableEntry() : 0xFFFFFFFF
+      const blockAddress = vhd.header.maxTableEntries > tableEntry
+        ? vhd.readAllocationTableEntry()
+        : 0xFFFFFFFF
       if (blockAddress !== 0xFFFFFFFF) {
-        console.log('blockAddress', blockAddress);
-        var actualLen = Math.min(len, blockSizeBytes - posInBlock);
+        var actualLen = Math.min(len, blockSizeBytes - posInBlock)
         vhd.readBlockData(blockAddress).then(function (block) {
-          console.log('read', block.length);
-          block.copy(buf, 0, posInBlock, posInBlock + actualLen);
-          return cb(actualLen);
+          block.copy(buf, 0, posInBlock, posInBlock + actualLen)
+          return cb(actualLen)
         }).catch(function (error) {
-          return console.log(error, error['stack'] ? error.stack : '');
-        });
+          console.error(error)
+          cb(-1)
+        })
       } else {
-        console.log('blockAddress is 0xFFFFFFFF');
         buf.fill(0, 0, len)
         return cb(len)
       }
     }
+  }
+
+  const toString = vals => vals.map(val => Buffer.isBuffer(val)
+    ? `Buffer(${val.length})`
+    : JSON.stringify(val, null, 2)
+  ).join(', ')
+  forEach(operations, (fn, name) => {
+    operations[name] = function (...args) {
+      const cb = args.pop()
+      args.push(function (...results) {
+        console.error(
+          '%s(%s) %s (%s)',
+          name,
+          toString(args.slice(0, -1)),
+          results[0] < 0 ? '=!>' : '==>',
+          toString(results)
+        )
+
+        return cb.apply(this, arguments)
+      })
+
+      return fn.apply(this, args)
+    }
   })
-}
 
-console.log(process.argv);
-var filePath = process.argv[2];
+  fuse.mount(dir, operations, cb)
+})
 
-async function run (mountPoint, file) {
-  const stats = await fs.stat(filePath)
-  console.log(stats)
-  let vhd = new Vhd(new RemoteHandlerLocal({ url: 'file://' + process.cwd() }), filePath)
+execPromise(async args => {
+  if (!args.length) {
+    return `Usage: xo-vhdmount <VHD file> [<mount point>]`
+  }
+
+  const [
+    vhdFile,
+    mountPoint = './vhd-mount'
+  ] = args
+
+  const vhd = new Vhd(
+    new RemoteHandlerLocal({ url: `file:///` }),
+    path.resolve(vhdFile)
+  )
+
+  await fromCallback(cb => fs.mkdir(mountPoint, cb)).catch(error => {
+    if (error && error.code !== 'EEXIST') {
+      throw error
+    }
+  })
+
   await vhd.readHeaderAndFooter()
   await vhd.readBlockTable()
-  try {
-    await fs.mkdir(mountPoint)
-    mountIt(mountPoint, vhd)
-  } catch (error) {
-    if (error.code === 'EEXIST') {
-      mountIt(mountPoint, vhd)
-    }
-    else
-      throw error
-  }
-}
 
+  await mountVhd(mountPoint, vhd)
 
-run('mntPoint', filePath).catch((error) => console.log(error, error.stack()))
+  await new Promise(resolve => process.on('SIGINT', resolve))
+
+  await fromCallback(cb => fuse.unmount(mountPoint))
+})
 
