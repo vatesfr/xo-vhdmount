@@ -29,7 +29,6 @@
     "exec-promise": "^0.6.1",
     "fs-promise": "^0.5.0",
     "fuse-bindings": "^2.9.0",
-    "get-stream": "^2.1.0",
     "lodash": "^4.16.6",
     "promise-toolbox": "^0.7.0"
   },

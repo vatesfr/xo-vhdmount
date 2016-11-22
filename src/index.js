@@ -4,11 +4,11 @@ import execPromise from 'exec-promise'
 import fs from 'fs'
 import fuse from 'fuse-bindings'
 import path from 'path'
-import { forEach, map } from 'lodash'
+import { forEach, get, isPlainObject } from 'lodash'
 import { fromCallback } from 'promise-toolbox'
 import { RemoteHandlerLocal } from '@nraynaud/xo-fs'
 
-import { Vhd } from './vhd'
+import Vhd from './vhd2'
 
 const {
   S_IFDIR,
@@ -18,72 +18,59 @@ const {
 } = fs.constants
 
 const mountVhd = (dir, vhd) => fromCallback(cb => {
-  const operations = {
-    init (cb) {
-      cb(0)
-    },
-    statfs (path, cb) {
-      cb(0, {})
-    },
-    readdir (path, cb) {
-      if (path === '/') {
-        cb(0, ['disk'])
-      } else {
-        cb(fuse.NOENT)
-      }
-    },
-    getattr (path, cb) {
-      const now = new Date()
-      const { uid, gid } = fuse.context()
+  const entries = {
+    vhdi1: vhd
+  }
+  const getEntry = path => {
+    if (path === '/') {
+      return entries
+    }
 
-      if (path === '/') {
-        cb(0, {
-          atime: now,
-          ctime: now,
-          gid,
-          mode: S_IFDIR | S_IRUSR | S_IXUSR,
-          mtime: now,
-          size: 100,
-          uid
-        })
-      } else if (path === '/disk') {
-        const diskSize = vhd.footer.currentSize.high * Math.pow(2, 32) + vhd.footer.currentSize.low
-        cb(0, {
-          atime: now,
-          ctime: now,
-          gid,
-          mode: S_IFREG | S_IRUSR,
-          mtime: now,
-          nlink: 1,
-          size: diskSize,
-          uid
-        })
+    return get(entries, path.split('/').slice(1))
+  }
+  const isDirectory = entry => isPlainObject(entry)
+  const isFile = entry => entry && !isPlainObject(entry)
+
+  let operations = {
+    readdir (path, cb) {
+      const entry = getEntry(path)
+      if (isDirectory(entry)) {
+        cb(0, Object.keys(entry))
       } else {
         cb(fuse.ENOENT)
       }
+    },
+    getattr (path, cb) {
+      const entry = getEntry(path)
+      if (!entry) {
+        return cb(fuse.ENOENT)
+      }
+
+      const { gid, uid } = fuse.context()
+      cb(0, Object.assign({
+        gid,
+        uid
+      }, isDirectory(entry)
+        ? {
+          mode: S_IFDIR | S_IRUSR | S_IXUSR
+        }
+        : {
+          mode: S_IFREG | S_IRUSR,
+          size: entry.size
+        }
+      ))
     },
     open (path, flags, cb) {
       cb(0, 42) // 42 is an fd
     },
     read (path, fd, buf, len, pos, cb) {
-      const blockSizeBytes = vhd.sectorsPerBlock * 512
-      const posInBlock = pos % blockSizeBytes
-      const tableEntry = Math.floor(pos / blockSizeBytes)
-      const blockAddress = vhd.header.maxTableEntries > tableEntry
-        ? vhd.readAllocationTableEntry()
-        : 0xFFFFFFFF
-      if (blockAddress !== 0xFFFFFFFF) {
-        var actualLen = Math.min(len, blockSizeBytes - posInBlock)
-        vhd.readBlockData(blockAddress).then(function (block) {
-          block.copy(buf, 0, posInBlock, posInBlock + actualLen)
-          return cb(actualLen)
-        }).catch(function (error) {
-          console.error(error)
-          cb(-1)
+      const entry = getEntry(path)
+      if (isFile(entry)) {
+        entry.read(buf, len, pos).then(len => {
+          cb(len)
         })
       } else {
-        buf.fill(0, 0, len)
-        return cb(len)
+        return cb(fuse.ENOENT)
       }
     }
   }
@@ -104,7 +91,7 @@ const mountVhd = (dir, vhd) => fromCallback(cb => {
           toString(results)
         )
 
-        return cb.apply(this, arguments)
+        return cb.apply(this, results)
       })
 
       return fn.apply(this, args)
@@ -112,6 +99,10 @@ const mountVhd = (dir, vhd) => fromCallback(cb => {
   })
 
   fuse.mount(dir, operations, cb)
+})
+
+process.on('unhandledRejection', error => {
+  console.error(error)
 })
 
 execPromise(async args => {
@@ -136,7 +127,7 @@ execPromise(async args => {
   })
 
   await vhd.readHeaderAndFooter()
-  await vhd.readBlockTable()
+  await vhd.readBlockAllocationTable()
 
   await mountVhd(mountPoint, vhd)
 

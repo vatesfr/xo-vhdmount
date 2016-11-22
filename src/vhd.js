@@ -174,10 +174,14 @@ function getParentLocatorSize (parentLocatorEntry) {
 
 // ===================================================================
 
-export class Vhd {
+export default class Vhd {
   constructor (handler, path) {
     this._handler = handler
     this._path = path
+  }
+
+  get size () {
+    return uint32ToUint64(this.footer.currentSize)
   }
 
   // =================================================================
@@ -283,7 +287,7 @@ export class Vhd {
   }
 
   // Returns a buffer that contains the block allocation table of a vhd file.
-  async readBlockTable () {
+  async readBlockAllocationTable () {
     const { header } = this
 
     const offset = uint32ToUint64(header.tableOffset)
@@ -301,7 +305,9 @@ export class Vhd {
 
   // Returns the address block at the entry location of one table.
   readAllocationTableEntry (entry) {
-    return this.blockTable.readUInt32BE(entry * VHD_ENTRY_SIZE)
+    return entry > this.header.maxTableEntries
+      ? BLOCK_UNUSED
+      : this.blockTable.readUInt32BE(entry * VHD_ENTRY_SIZE)
   }
 
   // Returns the data content of a block. (Not the bitmap !)
@@ -350,6 +356,28 @@ export class Vhd {
         end: offset + bitmapSize - 1
       })
     )
+  }
+
+  async read (buf, pos, len) {
+    const blockSizeBytes = this.sectorsPerBlock * VHD_SECTOR_SIZE
+
+    const tableEntry = Math.floor(pos / blockSizeBytes)
+    if (tableEntry > this.header.maxTableEntries) {
+      return 0
+    }
+
+    const posInBlock = pos % blockSizeBytes
+    const actualLen = Math.min(len, blockSizeBytes - posInBlock)
+
+    const blockAddr = this.readAllocationTableEntry(tableEntry)
+    if (blockAddr === BLOCK_UNUSED) {
+      buf.fill(0, 0, actualLen)
+    } else {
+      const block = await this.readBlockData(blockAddr)
+      block.copy(buf, 0, posInBlock)
+    }
+
+    return actualLen
   }
 
   // =================================================================
