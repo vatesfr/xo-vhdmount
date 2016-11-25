@@ -15,7 +15,9 @@
   },
   "preferGlobal": false,
   "main": "dist/",
-  "bin": {},
+  "bin": {
+    "xo-vhdmount": "dist/cli"
+  },
   "files": [
     "dist/"
   ],

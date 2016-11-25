@@ -1,12 +1,7 @@
-#!/usr/bin/env node
-
-import execPromise from 'exec-promise'
 import fs from 'fs'
 import fuse from 'fuse-bindings'
-import path from 'path'
 import { forEach, get, isPlainObject } from 'lodash'
 import { fromCallback } from 'promise-toolbox'
-import { RemoteHandlerLocal } from '@nraynaud/xo-fs'
 
 import Vhd from './vhd2'
 
@@ -17,9 +12,19 @@ const {
   S_IXUSR
 } = fs.constants
 
-const mountVhd = (dir, vhd) => fromCallback(cb => {
+export default async (dir, remoteHandler, path, { verbose } = {}) => {
+  await fromCallback(cb => fs.mkdir(dir, cb)).catch(error => {
+    if (error && error.code !== 'EEXIST') {
+      throw error
+    }
+  })
+
+  const vhd = new Vhd(remoteHandler, path)
+  await vhd.readHeaderAndFooter()
+  await vhd.readBlockAllocationTable()
+
   const entries = {
-    vhdi1: vhd
+    vhdi1: new Vhd(remoteHandler, path)
   }
   const getEntry = path => {
     if (path === '/') {
@@ -66,73 +71,43 @@ const mountVhd = (dir, vhd) => fromCallback(cb => {
     read (path, fd, buf, len, pos, cb) {
       const entry = getEntry(path)
       if (isFile(entry)) {
-        entry.read(buf, len, pos).then(len => {
-          cb(len)
-        })
+        entry.read(buf, pos, len).then(
+          len => { cb(len) },
+          error => {
+            console.error(error)
+            cb(-1)
+          }
+        )
       } else {
         return cb(fuse.ENOENT)
       }
     }
   }
 
-  const toString = vals => vals.map(val => Buffer.isBuffer(val)
-    ? `Buffer(${val.length})`
-    : JSON.stringify(val, null, 2)
-  ).join(', ')
-  forEach(operations, (fn, name) => {
-    operations[name] = function (...args) {
-      const cb = args.pop()
-      args.push(function (...results) {
-        console.error(
-          '%s(%s) %s (%s)',
-          name,
-          toString(args.slice(0, -1)),
-          results[0] < 0 ? '=!>' : '==>',
-          toString(results)
-        )
+  if (verbose) {
+    const toString = vals => vals.map(val => Buffer.isBuffer(val)
+      ? `Buffer(${val.length})`
+      : JSON.stringify(val, null, 2)
+    ).join(', ')
+    forEach(operations, (fn, name) => {
+      operations[name] = function (...args) {
+        const cb = args.pop()
+        args.push(function (...results) {
+          console.error(
+            '%s(%s) %s (%s)',
+            name,
+            toString(args.slice(0, -1)),
+            results[0] < 0 ? '=!>' : '==>',
+            toString(results)
+          )
 
-        return cb.apply(this, results)
-      })
+          return cb.apply(this, results)
+        })
 
-      return fn.apply(this, args)
-    }
-  })
-
-  fuse.mount(dir, operations, cb)
-})
-
-process.on('unhandledRejection', error => {
-  console.error(error)
-})
-
-execPromise(async args => {
-  if (!args.length) {
-    return `Usage: xo-vhdmount <VHD file> [<mount point>]`
+        return fn.apply(this, args)
+      }
+    })
   }
 
-  const [
-    vhdFile,
-    mountPoint = './vhd-mount'
-  ] = args
-
-  const vhd = new Vhd(
-    new RemoteHandlerLocal({ url: `file:///` }),
-    path.resolve(vhdFile)
-  )
-
-  await fromCallback(cb => fs.mkdir(mountPoint, cb)).catch(error => {
-    if (error && error.code !== 'EEXIST') {
-      throw error
-    }
-  })
-
-  await vhd.readHeaderAndFooter()
-  await vhd.readBlockAllocationTable()
-
-  await mountVhd(mountPoint, vhd)
-
-  await new Promise(resolve => process.on('SIGINT', resolve))
-
-  await fromCallback(cb => fuse.unmount(mountPoint))
-})
-
+  return fromCallback(cb => fuse.mount(dir, operations, cb))
+}
