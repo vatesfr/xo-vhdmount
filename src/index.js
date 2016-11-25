@@ -84,15 +84,17 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
     }
   }
 
-  if (verbose) {
-    const toString = vals => vals.map(val => Buffer.isBuffer(val)
-      ? `Buffer(${val.length})`
-      : JSON.stringify(val, null, 2)
-    ).join(', ')
-    forEach(operations, (fn, name) => {
-      operations[name] = function (...args) {
-        const cb = args.pop()
-        args.push(function (...results) {
+  const toString = vals => vals.map(val => Buffer.isBuffer(val)
+    ? `Buffer(${val.length})`
+    : JSON.stringify(val, null, 2)
+  ).join(', ')
+  forEach(operations, (fn, name) => {
+    operations[name] = function (...args) {
+      const i = args.length - 1
+      const cb = args[i]
+
+      if (verbose) {
+        args[i] = function (...results) {
           console.error(
             '%s(%s) %s (%s)',
             name,
@@ -102,12 +104,17 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
           )
 
           return cb.apply(this, results)
-        })
-
-        return fn.apply(this, args)
+        }
       }
-    })
-  }
+
+      try {
+        return fn.apply(this, args)
+      } catch (error) {
+        console.error(name, error)
+        cb(-1)
+      }
+    }
+  })
 
   return fromCallback(cb => fuse.mount(dir, operations, cb))
 }
