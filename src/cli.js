@@ -35,8 +35,22 @@ execPromise(async args => {
     { verbose }
   )
 
-  await new Promise(resolve => process.on('SIGINT', resolve))
+  await new Promise(resolve => {
+    process.on('SIGINT', () => {
+      resolve()
+    })
 
-  await fromCallback(cb => fuse.unmount(mountPoint, cb))
+    process.on('uncaughtException', error => {
+      console.error(error)
+      resolve()
+    })
+  })
+
+  await fromCallback(cb => fuse.unmount(mountPoint, (...args) => {
+    console.log({ args })
+    cb(...args)
+  }))
+
+  console.log('bye')
 })
 

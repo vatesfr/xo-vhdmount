@@ -24,7 +24,7 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
   await vhd.readBlockAllocationTable()
 
   const entries = {
-    vhdi1: new Vhd(remoteHandler, path)
+    vhdi1: vhd
   }
   const getEntry = path => {
     if (path === '/') {
