@@ -1,6 +1,6 @@
 import fs from 'fs'
 import fuse from 'fuse-bindings'
-import { forEach, get, isPlainObject } from 'lodash'
+import { forEach, get, isPlainObject, once } from 'lodash'
 import { fromCallback } from 'promise-toolbox'
 
 import Vhd from './vhd2'
@@ -116,5 +116,7 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
     }
   })
 
-  return fromCallback(cb => fuse.mount(dir, operations, cb))
+  await fromCallback(cb => fuse.mount(dir, operations, cb))
+
+  return once(() => fromCallback(cb => fuse.unmount(dir)))
 }

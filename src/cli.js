@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 
 import execPromise from 'exec-promise'
-import fuse from 'fuse-bindings'
 import path from 'path'
-import { fromCallback } from 'promise-toolbox'
 import { RemoteHandlerLocal } from '@nraynaud/xo-fs'
 
 import mountVhd from './'
@@ -28,7 +26,7 @@ execPromise(async args => {
     mountPoint = './vhd-mount'
   ] = args
 
-  await mountVhd(
+  const unmount = await mountVhd(
     mountPoint,
     new RemoteHandlerLocal({ url: `file:///` }),
     path.resolve(vhdFile),
@@ -46,10 +44,7 @@ execPromise(async args => {
     })
   })
 
-  await fromCallback(cb => fuse.unmount(mountPoint, (...args) => {
-    console.log({ args })
-    cb(...args)
-  }))
+  await unmount()
 
   console.log('bye')
 })
