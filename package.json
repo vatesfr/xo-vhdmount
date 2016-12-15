@@ -29,10 +29,16 @@
     "@nraynaud/xo-fs": "^0.0.5",
     "babel-runtime": "^6.18.0",
     "exec-promise": "^0.6.1",
+    "execa": "^0.5.0",
     "fs-promise": "^0.5.0",
     "fuse-bindings": "^2.9.0",
+    "golike-defer": "^0.0.0",
+    "inquirer": "^1.2.3",
     "lodash": "^4.16.6",
-    "promise-toolbox": "^0.7.0"
+    "parse-pairs": "^0.1.0",
+    "promise-toolbox": "^0.7.0",
+    "split-lines": "^1.1.0",
+    "tmp": "^0.0.31"
   },
   "devDependencies": {
     "babel-cli": "^6.18.0",

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import defer from 'golike-defer'
 import execPromise from 'exec-promise'
 import path from 'path'
 import { RemoteHandlerLocal } from '@nraynaud/xo-fs'
@@ -10,7 +11,7 @@ process.on('unhandledRejection', error => {
   console.error(error)
 })
 
-execPromise(async args => {
+execPromise(defer(async ($defer, args) => {
   if (!args.length) {
     return `Usage: xo-vhdmount [-v] <VHD file> [<mount point>]`
   }
@@ -26,12 +27,12 @@ execPromise(async args => {
     mountPoint = './vhd-mount'
   ] = args
 
-  const unmount = await mountVhd(
+  $defer(await mountVhd(
     mountPoint,
     new RemoteHandlerLocal({ url: `file:///` }),
     path.resolve(vhdFile),
     { verbose }
-  )
+  ))
 
   await new Promise(resolve => {
     process.on('SIGINT', () => {
@@ -44,8 +45,5 @@ execPromise(async args => {
     })
   })
 
-  await unmount()
-
   console.log('bye')
-})
-
+}))

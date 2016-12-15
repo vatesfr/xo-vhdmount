@@ -81,6 +81,11 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
       } else {
         return cb(fuse.ENOENT)
       }
+    },
+    statfs (path, cb) {
+      cb(0, {
+        bsize: 512
+      })
     }
   }
 
@@ -118,5 +123,5 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
 
   await fromCallback(cb => fuse.mount(dir, operations, cb))
 
-  return once(() => fromCallback(cb => fuse.unmount(dir)))
+  return once(() => fromCallback(cb => fuse.unmount(dir, cb)))
 }

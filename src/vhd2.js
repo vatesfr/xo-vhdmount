@@ -14,10 +14,11 @@ import { dirname, resolve } from 'path'
 
 /* eslint-disable no-unused-vars */
 
-const HARD_DISK_TYPE_DIFFERENCING = 4 // Delta
-const HARD_DISK_TYPE_DYNAMIC = 3 // Full
+const HARD_DISK_TYPE_DIFFERENCING = 4
+const HARD_DISK_TYPE_DYNAMIC = 3
+const HARD_DISK_TYPE_FIXED = 2
 const PLATFORM_CODE_NONE = 0
-const SECTOR_SIZE = 512
+export const SECTOR_SIZE = 512
 
 /* eslint-enable no-unused vars */
 
@@ -163,14 +164,14 @@ const streamToNewBuffer = stream => new Promise((resolve, reject) => {
 const streamToExistingBuffer = (
   stream,
   buffer,
-  begin = 0,
+  offset = 0,
   end = buffer.length
 ) => new Promise((resolve, reject) => {
-  assert(begin >= 0)
-  assert(end > begin)
+  assert(offset >= 0)
+  assert(end > offset)
   assert(end <= buffer.length)
 
-  let i = begin
+  let i = offset
 
   const onData = chunk => {
     if (i >= end) {
@@ -188,7 +189,7 @@ const streamToExistingBuffer = (
     stream.removeListener('error', onError)
   }
   const onEnd = () => {
-    resolve(i - begin)
+    resolve(i - offset)
     clean()
   }
   stream.on('end', onEnd)
@@ -216,6 +217,10 @@ const computeChecksum = (struct, buf, offset = 0) => {
   }
 
   return ~sum >>> 0
+}
+
+const updateChecksum = (struct, buf, offset) => {
+  pack(struct.fields.checksum, computeChecksum(struct, buf, offset), buf, offset)
 }
 
 const verifyChecksum = (struct, buf, offset) =>
@@ -282,24 +287,37 @@ export default class Vhd {
     if (buf) {
       assert(offset >= 0)
       assert(length > 0)
-      assert(length <= buf.length)
 
-      buf.fill(0, offset, length)
-      return length
+      const end = offset + length
+      assert(end <= buf.length)
+
+      buf.fill(0, offset, end)
+      return Promise.resolve(length)
     }
 
-    return Buffer.alloc(length)
+    return Promise.resolve(Buffer.alloc(length))
   }
 
-  // Return the first sector of a block or undefined if not found.
+  // Return the position of a block in the VHD or undefined if not found.
   _getBlockAddress (block) {
     if (block < this._header.maxTableEntries) {
       const blockAddr = this._blockAllocationTable[block]
       if (blockAddr !== 0xFFFFFFFF) {
-        return blockAddr
+        return blockAddr * SECTOR_SIZE
       }
     }
   }
+
+  _write (begin, buf) {
+    return this._handler.createOutputStream(this._path, {
+      start: begin
+    }).then(stream => new Promise((resolve, reject) => {
+      stream.once('error', reject)
+      stream.end(buf, resolve)
+    }))
+  }
+
+  // -----------------------------------------------------------------
 
   async readHeaderAndFooter () {
     const buf = await this._read(0, FOOTER_SIZE + HEADER_SIZE)
@@ -312,9 +330,27 @@ export default class Vhd {
       throw new Error('header checksum does not match')
     }
 
-    const footer = unpack(fuFooter, buf)
-    const header = unpack(fuHeader, buf, FOOTER_SIZE)
+    return this._initMetadata(
+      unpack(fuHeader, buf, FOOTER_SIZE),
+      unpack(fuFooter, buf)
+    )
+  }
 
+  async writeHeaderAndFooter (header, footer) {
+    const buf = Buffer.allocUnsafe(FOOTER_SIZE + HEADER_SIZE)
+
+    pack(footer, buf)
+    pack(header, buf, FOOTER_SIZE)
+
+    updateChecksum(fuFooter, buf)
+    updateChecksum(fuHeader, buf, FOOTER_SIZE)
+
+    await this._write(0, buf)
+
+    return this._initMetadata(header, footer)
+  }
+
+  async _initMetadata (header, footer) {
     const sectorsPerBlock = Math.floor(header.blockSize / SECTOR_SIZE)
 
     this._blockBitmapSize = Math.ceil(sectorsPerBlock / 8) // 1 bit per sector
@@ -334,6 +370,8 @@ export default class Vhd {
     }
   }
 
+  // -----------------------------------------------------------------
+
   async readBlockAllocationTable () {
     const { maxTableEntries, tableOffset } = this._header
     const fuTable = fu.uint32(maxTableEntries)
@@ -344,71 +382,88 @@ export default class Vhd {
     )
   }
 
-  // Read data in a block.
-  //
-  // TODO: add sector dirty checking.
-  readBlock (block, opts) {
-    const { blockSize } = this._header
+  writeBlockAllocationTable (table) {
+    const { maxTableEntries, tableOffset } = this._header
+    const fuTable = fu.uint32(maxTableEntries)
 
-    const {
-      begin = 0,
-      buffer,
-      end = blockSize,
-      offset = 0
-    } = opts || {}
-
-    assert(begin >= 0)
-    assert(end > begin)
-    assert(end <= blockSize)
-
-    const length = end - begin
-
-    const blockAddr = this._getBlockAddress(block)
-    const parent = this._parent
-    if (!blockAddr) {
-      return parent
-        ? parent.readBlock(block, opts)
-        : this._zeroes(length, buffer, offset)
-    }
-
-    const blockStart = this._blockBitmapSize + SECTOR_SIZE * blockAddr
-    return this._read(blockStart + begin, length, buffer, offset)
+    return this._write(
+      uint32ToUint64(tableOffset),
+      fuTable.pack(table)
+    ).then(() => {
+      this._blockAllocationTable = table
+    })
   }
 
-  // Read data in a sector.
-  async readSector (sector, {
-    begin = 0,
-    buffer,
-    end = SECTOR_SIZE,
-    offset = 0
-  } = {}) {
+  // -----------------------------------------------------------------
+
+  // async _readBlockSectors (block, sectorsToRead, beginByte, endByte, buf, offset) {
+  //   const blockAddr = this._getBlockAddress(block)
+  //   if (!blockAddr) {
+  //     for
+  //   }
+
+  //   const blockBitmapSize = this._blockBitmapSize
+  //   const bitmap = await this._read(blockAddr, blockBitmapSize)
+  // }
+
+  _readBlock (block, begin, length, buf, offset) {
     assert(begin >= 0)
-    assert(end > begin)
-    assert(end <= SECTOR_SIZE)
+    assert(length > 0)
+    assert(begin + length <= this._header.blockSize)
 
-    const length = end - begin
+    const parent = this._parent
 
+    const blockAddr = this._getBlockAddress(block)
+    if (!blockAddr) {
+      return parent
+        ? parent._readBlock(block, begin, length, buf, offset)
+        : this._zeroes(length, buf, offset)
+    }
+
+    const { blockSize } = this._header
+
+    const blockBitmapSize = this._blockBitmapSize
+
+    if (!parent) { // non differencing
+      return this._read(blockAddr + blockBitmapSize + begin, length, buf, offset)
+    }
+
+    throw new Error('not implemented')
+
+    const [ beginSector, beginByte ] = div(begin, SECTOR_SIZE)
+    const [ endSector, endByte ] = div(begin + length - 1, SECTOR_SIZE)
+
+    const sectorsToRead = createBitmap(blockBitmapSize)
+    for (let sector = beginSector; sector <= endSector; ++sector) {
+      setBit(sectorsToRead, sector)
+    }
+
+    return this._readBlockSectors(block, sectorsToRead, beginByte, endByte, buf, offset)
+  }
+
+  // Read a sector.
+  async readSector (sector, buf, offset) {
     const [ block, sectorInBlock ] = div(sector, this._sectorsPerBlock)
 
     const blockAddr = this._getBlockAddress(block)
     const parent = this._parent
     if (blockAddr) {
-      const blockStart = SECTOR_SIZE * blockAddr
       const blockBitmapSize = this._blockBitmapSize
 
-      const bitmap = await this._read(blockStart, blockBitmapSize)
+      const bitmap = await this._read(blockAddr, blockBitmapSize)
       if (testBit(bitmap, sectorInBlock)) {
-        const sectorStart = blockBitmapSize + SECTOR_SIZE * (
-          blockAddr + sectorInBlock
+        return this._read(
+          blockAddr + blockBitmapSize + sectorInBlock * SECTOR_SIZE,
+          SECTOR_SIZE,
+          buf,
+          offset
         )
-
-        return this._read(sectorStart + begin, length, buffer, offset)
       }
     } else if (!parent) {
-      return this._zeroes(length, buffer, offset)
+      return this._zeroes(SECTOR_SIZE, buf, offset)
     }
 
-    return parent.readSector(sector, { begin, buffer, end, offset })
+    return parent.readSector(sector, buf, offset)
   }
 
   read (buffer, begin, length = buffer.length) {
@@ -418,7 +473,7 @@ export default class Vhd {
 
     const { size } = this
     if (begin >= size) {
-      return 0
+      return Promise.resolve(0)
     }
 
     const end = Math.min(size, begin + length)
@@ -429,14 +484,17 @@ export default class Vhd {
 
     const promises = []
     for (let block = beginBlock; block <= endBlock; ++block) {
-      promises.push(this.readBlock(block, {
-        begin: block === beginBlock ? beginOffsetInBlock : 0,
+      const beginInBlock = block === beginBlock ? beginOffsetInBlock : 0
+      const endInBlock = block === endBlock ? endOffsetInBlock + 1 : blockSize
+      promises.push(this._readBlock(
+        block,
+        beginInBlock,
+        endInBlock - beginInBlock,
         buffer,
-        end: block === endBlock ? endOffsetInBlock + 1 : blockSize,
-        offset: block === beginBlock
+        block === beginBlock
           ? 0
           : (block - beginBlock) * blockSize - beginOffsetInBlock
-      }))
+      ))
     }
     return Promise.all(promises).then(() => end - begin)
   }
