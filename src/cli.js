@@ -35,9 +35,8 @@ execPromise(defer(async ($defer, args) => {
   ))
 
   await new Promise(resolve => {
-    process.on('SIGINT', () => {
-      resolve()
-    })
+    process.on('SIGINT', resolve)
+    process.on('SIGTERM', resolve)
 
     process.on('uncaughtException', error => {
       console.error(error)

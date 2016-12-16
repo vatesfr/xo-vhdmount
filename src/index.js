@@ -36,7 +36,7 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
   const isDirectory = entry => isPlainObject(entry)
   const isFile = entry => entry && !isPlainObject(entry)
 
-  let operations = {
+  const operations = {
     readdir (path, cb) {
       const entry = getEntry(path)
       if (isDirectory(entry)) {
@@ -71,13 +71,17 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
     read (path, fd, buf, len, pos, cb) {
       const entry = getEntry(path)
       if (isFile(entry)) {
-        entry.read(buf, pos, len).then(
-          len => { cb(len) },
-          error => {
-            console.error(error)
-            cb(-1)
-          }
-        )
+        let readen = 0 // old English but clearer than read
+        const loop = () => entry.read(buf, pos + readen, len - readen, readen)
+          .then(n => n && (readen += n) < len
+            ? loop()
+            : void cb(readen)
+          )
+
+        loop().catch(error => {
+          console.error(error)
+          cb(-1)
+        })
       } else {
         return cb(fuse.ENOENT)
       }
