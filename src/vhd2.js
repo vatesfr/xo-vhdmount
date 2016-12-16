@@ -1,6 +1,6 @@
 import assert from 'assert'
 import fu from '@nraynaud/struct-fu'
-import { dirname, resolve } from 'path'
+import { dirname } from 'path'
 
 // ===================================================================
 //
@@ -219,10 +219,6 @@ const computeChecksum = (struct, buf, offset = 0) => {
   return ~sum >>> 0
 }
 
-const updateChecksum = (struct, buf, offset) => {
-  pack(struct.fields.checksum, computeChecksum(struct, buf, offset), buf, offset)
-}
-
 const verifyChecksum = (struct, buf, offset) =>
   unpack(struct.fields.checksum, buf, offset) === computeChecksum(struct, buf, offset)
 
@@ -242,8 +238,6 @@ const getParentLocatorSize = parentLocatorEntry => {
 
 // Euclidean division, returns the quotient and the remainder of a / b.
 const div = (a, b) => [ Math.floor(a / b), a % b ]
-
-const wrap = value => () => value
 
 export default class Vhd {
   constructor (handler, path) {
@@ -308,15 +302,6 @@ export default class Vhd {
     }
   }
 
-  _write (begin, buf) {
-    return this._handler.createOutputStream(this._path, {
-      start: begin
-    }).then(stream => new Promise((resolve, reject) => {
-      stream.once('error', reject)
-      stream.end(buf, resolve)
-    }))
-  }
-
   // -----------------------------------------------------------------
 
   async readHeaderAndFooter () {
@@ -336,20 +321,6 @@ export default class Vhd {
     )
   }
 
-  async writeHeaderAndFooter (header, footer) {
-    const buf = Buffer.allocUnsafe(FOOTER_SIZE + HEADER_SIZE)
-
-    pack(footer, buf)
-    pack(header, buf, FOOTER_SIZE)
-
-    updateChecksum(fuFooter, buf)
-    updateChecksum(fuHeader, buf, FOOTER_SIZE)
-
-    await this._write(0, buf)
-
-    return this._initMetadata(header, footer)
-  }
-
   async _initMetadata (header, footer) {
     const sectorsPerBlock = Math.floor(header.blockSize / SECTOR_SIZE)
 
@@ -359,9 +330,11 @@ export default class Vhd {
     this._sectorsPerBlock = sectorsPerBlock
 
     if (footer.diskType === HARD_DISK_TYPE_DIFFERENCING) {
+      throw new Error('plop')
+
       const parent = new Vhd(
         this._handler,
-        resolve(dirname(this._path), header.parentUnicodeName)
+        `${dirname(this._path)}/${header.parentUnicodeName}`
       )
       await parent.readHeaderAndFooter()
       await parent.readBlockAllocationTable()
@@ -382,120 +355,92 @@ export default class Vhd {
     )
   }
 
-  writeBlockAllocationTable (table) {
-    const { maxTableEntries, tableOffset } = this._header
-    const fuTable = fu.uint32(maxTableEntries)
-
-    return this._write(
-      uint32ToUint64(tableOffset),
-      fuTable.pack(table)
-    ).then(() => {
-      this._blockAllocationTable = table
-    })
-  }
-
   // -----------------------------------------------------------------
 
-  // async _readBlockSectors (block, sectorsToRead, beginByte, endByte, buf, offset) {
-  //   const blockAddr = this._getBlockAddress(block)
-  //   if (!blockAddr) {
-  //     for
-  //   }
+  // read a single sector in a block
+  async _readBlockSector (block, sector, begin, length, buf, offset) {
+    assert(begin >= 0)
+    assert(length > 0)
+    assert(begin + length <= SECTOR_SIZE)
 
-  //   const blockBitmapSize = this._blockBitmapSize
-  //   const bitmap = await this._read(blockAddr, blockBitmapSize)
-  // }
+    const blockAddr = this._getBlockAddress(block)
+    if (blockAddr) {
+      // FIXME: do not check bitmap for plain VHD.
+      const blockBitmapSize = this._blockBitmapSize
+
+      const bitmap = await this._read(blockAddr, blockBitmapSize)
+      if (testBit(bitmap, sector)) {
+        return this._read(
+          blockAddr + blockBitmapSize + sector * SECTOR_SIZE + begin,
+          length,
+          buf,
+          offset
+        )
+      }
+    }
+
+    const parent = this._parent
+    return parent
+      ? parent._readBlockSector(block, sector, begin, length, buf, offset)
+      : this._zeroes(length, buf, offset)
+  }
 
   _readBlock (block, begin, length, buf, offset) {
     assert(begin >= 0)
     assert(length > 0)
-    assert(begin + length <= this._header.blockSize)
+
+    const { blockSize } = this._header
+    assert(begin + length <= blockSize)
 
     const parent = this._parent
 
     const blockAddr = this._getBlockAddress(block)
+
+    return blockAddr
+      ? this._read(blockAddr + this._blockBitmapSize + begin, length, buf, offset)
+      : this._zeroes(length, buf, offset)
+
     if (!blockAddr) {
       return parent
         ? parent._readBlock(block, begin, length, buf, offset)
         : this._zeroes(length, buf, offset)
     }
 
-    const { blockSize } = this._header
-
-    const blockBitmapSize = this._blockBitmapSize
-
-    if (!parent) { // non differencing
-      return this._read(blockAddr + blockBitmapSize + begin, length, buf, offset)
+    if (!parent) {
+      return this._read(blockAddr + this._blockBitmapSize + begin, length, buf, offset)
     }
 
-    throw new Error('not implemented')
-
-    const [ beginSector, beginByte ] = div(begin, SECTOR_SIZE)
-    const [ endSector, endByte ] = div(begin + length - 1, SECTOR_SIZE)
-
-    const sectorsToRead = createBitmap(blockBitmapSize)
-    for (let sector = beginSector; sector <= endSector; ++sector) {
-      setBit(sectorsToRead, sector)
-    }
-
-    return this._readBlockSectors(block, sectorsToRead, beginByte, endByte, buf, offset)
+    // FIXME: we should read as many sectors in a single pass as
+    // possible for maximum perf.
+    const [ sector, offsetInSector ] = div(begin, SECTOR_SIZE)
+    return this._readBlockSector(
+      block,
+      sector,
+      offsetInSector,
+      Math.min(length, SECTOR_SIZE - offsetInSector),
+      buf,
+      offset
+    )
   }
 
-  // Read a sector.
-  async readSector (sector, buf, offset) {
-    const [ block, sectorInBlock ] = div(sector, this._sectorsPerBlock)
-
-    const blockAddr = this._getBlockAddress(block)
-    const parent = this._parent
-    if (blockAddr) {
-      const blockBitmapSize = this._blockBitmapSize
-
-      const bitmap = await this._read(blockAddr, blockBitmapSize)
-      if (testBit(bitmap, sectorInBlock)) {
-        return this._read(
-          blockAddr + blockBitmapSize + sectorInBlock * SECTOR_SIZE,
-          SECTOR_SIZE,
-          buf,
-          offset
-        )
-      }
-    } else if (!parent) {
-      return this._zeroes(SECTOR_SIZE, buf, offset)
-    }
-
-    return parent.readSector(sector, buf, offset)
-  }
-
-  read (buffer, begin, length = buffer.length) {
-    assert(Buffer.isBuffer(buffer))
+  read (buf, begin, length = buf.length) {
+    assert(Buffer.isBuffer(buf))
     assert(begin >= 0)
-    assert(length <= buffer.length)
+    assert(length <= buf.length)
 
     const { size } = this
     if (begin >= size) {
       return Promise.resolve(0)
     }
 
-    const end = Math.min(size, begin + length)
-
     const { blockSize } = this._header
-    const [ beginBlock, beginOffsetInBlock ] = div(begin, blockSize)
-    const [ endBlock, endOffsetInBlock ] = div(end - 1, blockSize)
+    const [ block, beginInBlock ] = div(begin, blockSize)
 
-    const promises = []
-    for (let block = beginBlock; block <= endBlock; ++block) {
-      const beginInBlock = block === beginBlock ? beginOffsetInBlock : 0
-      const endInBlock = block === endBlock ? endOffsetInBlock + 1 : blockSize
-      promises.push(this._readBlock(
-        block,
-        beginInBlock,
-        endInBlock - beginInBlock,
-        buffer,
-        block === beginBlock
-          ? 0
-          : (block - beginBlock) * blockSize - beginOffsetInBlock
-      ))
-    }
-    return Promise.all(promises).then(() => end - begin)
+    return this._readBlock(
+      block,
+      beginInBlock,
+      Math.min(length, blockSize - beginInBlock, size - begin),
+      buf
+    )
   }
 }
