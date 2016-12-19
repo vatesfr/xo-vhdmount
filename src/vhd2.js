@@ -365,22 +365,21 @@ export default class Vhd {
     assert(begin + length <= SECTOR_SIZE)
 
     const blockAddr = this._getBlockAddress(block)
-    if (blockAddr) {
-      // FIXME: do not check bitmap for plain VHD.
-      const blockBitmapSize = this._blockBitmapSize
+    const blockBitmapSize = this._blockBitmapSize
+    const parent = this._parent
 
-      const bitmap = await this._read(blockAddr, blockBitmapSize)
-      if (testBit(bitmap, sector)) {
-        return this._read(
-          blockAddr + blockBitmapSize + sector * SECTOR_SIZE + begin,
-          length,
-          buf,
-          offset
-        )
-      }
+    if (blockAddr && (
+      !parent ||
+      testBit(await this._read(blockAddr, blockBitmapSize), sector)
+    )) {
+      return this._read(
+        blockAddr + blockBitmapSize + sector * SECTOR_SIZE + begin,
+        length,
+        buf,
+        offset
+      )
     }
 
-    const parent = this._parent
     return parent
       ? parent._readBlockSector(block, sector, begin, length, buf, offset)
       : this._zeroes(length, buf, offset)
@@ -394,21 +393,17 @@ export default class Vhd {
     assert(begin + length <= blockSize)
 
     const blockAddr = this._getBlockAddress(block)
-    return blockAddr
-      ? this._read(blockAddr + this._blockBitmapSize + begin, length, buf, offset)
-      : this._zeroes(length, buf, offset)
+    const parent = this._parent
 
-    // const parent = this._parent
+    if (!blockAddr) {
+      return parent
+        ? parent._readBlock(block, begin, length, buf, offset)
+        : this._zeroes(length, buf, offset)
+    }
 
-    // if (!blockAddr) {
-    //   return parent
-    //     ? parent._readBlock(block, begin, length, buf, offset)
-    //     : this._zeroes(length, buf, offset)
-    // }
-
-    // if (!parent) {
-    //   return this._read(blockAddr + this._blockBitmapSize + begin, length, buf, offset)
-    // }
+    if (!parent) {
+      return this._read(blockAddr + this._blockBitmapSize + begin, length, buf, offset)
+    }
 
     // FIXME: we should read as many sectors in a single pass as
     // possible for maximum perf.
@@ -438,13 +433,9 @@ export default class Vhd {
     return this._readBlock(
       block,
       beginInBlock,
-      length = Math.min(length, blockSize - beginInBlock, size - begin),
+      Math.min(length, blockSize - beginInBlock, size - begin),
       buf,
       offset
-    ).then(actualLength => {
-      assert(actualLength === length)
-
-      return actualLength
-    })
+    )
   }
 }
