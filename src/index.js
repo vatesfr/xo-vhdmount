@@ -12,8 +12,13 @@ const S_IXUSR = 1 << 6
 
 export default async (dir, remoteHandler, path, { verbose } = {}) => {
   await fromCallback(cb => fs.mkdir(dir, cb)).catch(error => {
-    if (error && error.code !== 'EEXIST') {
-      throw error
+    const code = error && error.code
+    if (code !== 'EEXIST') {
+      return fromCallback(cb => fs.stat(dir, cb)).then(stats => {
+        if (!stats.isDirectory()) {
+          throw error
+        }
+      })
     }
   })
 
@@ -81,7 +86,7 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
           cb(-1)
         })
       } else {
-        return cb(fuse.ENOENT)
+        cb(fuse.ENOENT)
       }
     },
     statfs (path, cb) {
@@ -101,7 +106,17 @@ export default async (dir, remoteHandler, path, { verbose } = {}) => {
       const cb = args[i]
 
       if (verbose) {
+        const timeout = setInterval(() => {
+          console.error(
+            '%s(%s) =?> [still running]',
+            name,
+            toString(args.slice(0, -1))
+          )
+        }, 1e3)
+
         args[i] = function (...results) {
+          clearInterval(timeout)
+
           console.error(
             '%s(%s) %s (%s)',
             name,

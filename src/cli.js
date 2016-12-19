@@ -24,7 +24,7 @@ execPromise(defer(async ($defer, args) => {
 
   const [
     vhdFile,
-    mountPoint = './vhd-mount'
+    mountPoint = './xo-vhdmount'
   ] = args
 
   $defer(await mountVhd(
